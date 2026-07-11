@@ -1,0 +1,7 @@
+services:
+  darth-vaders-world:
+    build: .
+    container_name: darth-vaders-world
+    restart: unless-stopped
+    env_file:
+      - .env
