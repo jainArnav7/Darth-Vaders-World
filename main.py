@@ -26,7 +26,12 @@ POINTS_MAP = {
     "forfeit": -2
 }
 
-# Explicitly using utf-8 encoding to prevent Windows character map crashes
+SHOP_ITEMS = {
+    "shield": {"name": "🛡️ Shield", "cost": 5, "desc": "Skip a turn without losing points."},
+    "reverse": {"name": "🔄 Reverse Card", "cost": 10, "desc": "Force another active player to do your prompt instead."},
+    "target": {"name": "🎯 Target", "cost": 15, "desc": "Bypass the queue order and pick who goes next."}
+}
+
 def load_json(filename):
     if os.path.exists(filename):
         with open(filename, "r", encoding="utf-8") as f:
@@ -37,7 +42,6 @@ def save_json(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-# Load base configs from decoupled file
 prompts_data = load_json(DEFAULT_PROMPTS_FILE)
 
 DEFAULT_TRUTHS = prompts_data.get("truths", {})
@@ -45,12 +49,12 @@ DEFAULT_DARES = prompts_data.get("dares", {})
 CHALLENGES = prompts_data.get("challenges", [])
 PENALTIES = prompts_data.get("penalties", [])
 
-# Dynamic server and player session stores
 custom_storage = load_json(DATA_FILE)
 stats_storage = load_json(STATS_FILE)
 active_games = {}
 
 def ensure_guild_storage(guild_id):
+    guild_id = str(guild_id)
     if guild_id not in custom_storage:
         custom_storage[guild_id] = {"truth": [], "dare": {"in_person": [], "online": []}}
 
@@ -64,8 +68,12 @@ def ensure_user_stats(guild_id, user_id):
             "truths_completed": 0,
             "dares_completed": 0,
             "challenges_completed": 0,
-            "forfeits": 0
+            "forfeits": 0,
+            "inventory": {"shield": 0, "reverse": 0, "target": 0}
         }
+    # Backward compatibility check for inventory
+    if "inventory" not in stats_storage[guild_id][user_id]:
+        stats_storage[guild_id][user_id]["inventory"] = {"shield": 0, "reverse": 0, "target": 0}
 
 def track_activity(guild_id, user_id, stat_type, points_change):
     guild_id, user_id = str(guild_id), str(user_id)
@@ -78,40 +86,78 @@ def track_activity(guild_id, user_id, stat_type, points_change):
     save_json(STATS_FILE, stats_storage)
     return stats_storage[guild_id][user_id]
 
-async def advance_turn(guild_id, channel):
+async def advance_turn(guild_id, channel, override_next_player=None):
     guild_id = str(guild_id)
     if guild_id in active_games and len(active_games[guild_id]["players"]) > 0:
         game = active_games[guild_id]
-        game["index"] = (game["index"] + 1) % len(game["players"])
+        
+        if override_next_player:
+            player_str = str(override_next_player)
+            if player_str in game["players"]:
+                game["index"] = game["players"].index(player_str)
+        else:
+            game["index"] = (game["index"] + 1) % len(game["players"])
+            
         next_player_id = game["players"][game["index"]]
         await channel.send(f"🔄 **Turn Tracker:** It is now <@{next_player_id}>'s turn! Pick your fate using `/truth`, `/dare`, or `/random_tod`.")
 
+def get_multiplier_details():
+    """Calculates a 5% chance Golden Turn modifier."""
+    if random.random() < 0.05:
+        mult = random.choice([2, 3])
+        return mult, f"✨🎲 **GOLDEN TURN!** All stakes are multiplied by **x{mult}**! Big rewards or devastating failure! 🎲✨"
+    return 1, ""
+
 # ==========================================
-# 2. INTERACTIVE BUTTON UI (WITH REF TIMER)
+# 2. INTERACTIVE BUTTON UI (LOOPHOLE PROOF)
 # ==========================================
 class GameActionView(discord.ui.View):
-    def __init__(self, target_user: discord.Member, points_worth: int, game_type: str, show_timer: bool = False):
+    def __init__(self, target_user: discord.Member, points_worth: int, game_type: str, show_timer: bool = False, multiplier: int = 1):
         super().__init__(timeout=None)
         self.target_user = target_user
-        self.points_worth = points_worth
+        self.points_worth = points_worth * multiplier
         self.game_type = game_type 
+        self.multiplier = multiplier
+        self.is_completed = False 
         
         if not show_timer:
             self.remove_item(self.start_timer_button)
 
-    @discord.ui.button(label="Done", style=discord.ButtonStyle.success, emoji="✅")
-    async def complete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="I'm Done (Needs Proof)", style=discord.ButtonStyle.primary, emoji="✋")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target_user.id:
             return await interaction.response.send_message("❌ This is not your turn!", ephemeral=True)
+
+        self.is_completed = True
+        button.disabled = True
+        button.label = "Waiting for Verification..."
+        await interaction.response.edit_message(view=self)
+        
+        await interaction.followup.send(f"👀 **<@{self.target_user.id}> claims they finished!** Send your proof, then another active player must click **Verify** to award the points.")
+
+    @discord.ui.button(label="Verify (Other Players)", style=discord.ButtonStyle.success, emoji="✅")
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_completed:
+            return await interaction.response.send_message("❌ The player hasn't marked this as done yet!", ephemeral=True)
+            
+        if interaction.user.id == self.target_user.id:
+            return await interaction.response.send_message("❌ Nice try! You cannot verify your own task. Someone else must vouch for you.", ephemeral=True)
+
+        guild_id_str = str(interaction.guild_id)
+        user_id_str = str(interaction.user.id)
+        
+        if guild_id_str in active_games and len(active_games[guild_id_str]["players"]) > 0:
+            if user_id_str not in active_games[guild_id_str]["players"]:
+                return await interaction.response.send_message("❌ You cannot verify this because you are not currently in the game queue! Use `/join_game` first.", ephemeral=True)
 
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        user_stats = track_activity(interaction.guild_id, interaction.user.id, self.game_type, self.points_worth)
+        user_stats = track_activity(interaction.guild_id, self.target_user.id, self.game_type, self.points_worth)
         
         embed = discord.Embed(
-            description=f"🎉 **{interaction.user.display_name}** completed the task and earned **{self.points_worth} points**! (Total: {user_stats['points']} pts)",
+            description=f"🎉 **{self.target_user.display_name}**'s task was verified by **{interaction.user.display_name}**! They earned **{self.points_worth} points**! (Total: {user_stats['points']} pts)",
             color=discord.Color.green()
         )
         await interaction.followup.send(embed=embed)
@@ -126,7 +172,7 @@ class GameActionView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        loss = abs(POINTS_MAP["forfeit"])
+        loss = abs(POINTS_MAP["forfeit"]) * self.multiplier
         user_stats = track_activity(interaction.guild_id, interaction.user.id, "forfeits", -loss)
         
         penalty = random.choice(PENALTIES) if PENALTIES else "Do 10 pushups."
@@ -159,6 +205,8 @@ class GameActionView(discord.ui.View):
 # 3. BOT INITIALIZATION
 # ==========================================
 intents = discord.Intents.default()
+intents.messages = True
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -169,6 +217,47 @@ async def on_ready():
         print(f"Synced {len(synced)} slash commands globally.")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+# ==========================================
+# ANONYMOUS SECRET PROMPTS (DM ENGINE)
+# ==========================================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if isinstance(message.channel, discord.DMChannel):
+        text = message.content.strip()
+        if text.startswith("truth:"):
+            content = text[6:].strip()
+            for guild in bot.guilds:
+                ensure_guild_storage(guild.id)
+                custom_storage[str(guild.id)]["truth"].append(content)
+            save_json(DATA_FILE, custom_storage)
+            await message.channel.send("🤫 **Anonymous Truth added successfully to all servers!** Nobody will know it was you.")
+        elif text.startswith("dare_online:"):
+            content = text[12:].strip()
+            for guild in bot.guilds:
+                ensure_guild_storage(guild.id)
+                custom_storage[str(guild.id)]["dare"]["online"].append(content)
+            save_json(DATA_FILE, custom_storage)
+            await message.channel.send("⚡ **Anonymous Online Dare added successfully to all servers!**")
+        elif text.startswith("dare_person:"):
+            content = text[12:].strip()
+            for guild in bot.guilds:
+                ensure_guild_storage(guild.id)
+                custom_storage[str(guild.id)]["dare"]["in_person"].append(content)
+            save_json(DATA_FILE, custom_storage)
+            await message.channel.send("👟 **Anonymous In-Person Dare added successfully to all servers!**")
+        else:
+            await message.channel.send(
+                "🕵️‍♂️ **Anonymous Content Submission Box** 🕵️‍♂️\n"
+                "To submit anonymous prompts without revealing your name in public commands, reply with exactly one of these prefixes:\n\n"
+                "`truth: Your truth prompt here`\n"
+                "`dare_online: Your online dare prompt here`\n"
+                "`dare_person: Your in-person dare prompt here`"
+            )
+    await bot.process_commands(message)
 
 # ==========================================
 # 4. QUEUE & SYSTEM LOBBY COMMANDS
@@ -202,7 +291,7 @@ async def leave_game(interaction: discord.Interaction):
         await interaction.response.send_message("You are not currently in a game.", ephemeral=True)
 
 # ==========================================
-# 5. USER STAT PROFILES & LEADERBOARDS
+# 5. USER STAT PROFILES, ACHIEVEMENT ENGINE & LEADERBOARDS
 # ==========================================
 @bot.tree.command(name="profile", description="View a player's Truth or Dare performance profile dashboard.")
 async def profile(interaction: discord.Interaction, member: discord.Member = None):
@@ -217,6 +306,17 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
     if total_attempts > 0:
         chicken_ratio = (stats["forfeits"] / total_attempts) * 100
         
+    # Achievement Processing System
+    titles = []
+    if stats["dares_completed"] >= 10:
+        titles.append("🔥 **The Daredevil** (10+ Dares Executed)")
+    if stats["truths_completed"] >= 15:
+        titles.append("🤫 **The Open Book** (15+ Truths Mastered)")
+    if total_attempts >= 5 and chicken_ratio > 50.0:
+        titles.append("🐔 **The Chicken** (Forfeit Ratio over 50%)")
+        
+    titles_display = "\n".join(titles) if titles else "*No unlocked titles yet*"
+
     embed = discord.Embed(title=f"📊 Game Profile: {target.display_name}", color=discord.Color.purple())
     embed.set_thumbnail(url=target.display_avatar.url)
     
@@ -227,6 +327,12 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
     embed.add_field(name="🤫 Truths Mastered", value=f"💬 {stats['truths_completed']}", inline=True)
     embed.add_field(name="🔥 Dares Executed", value=f"⚡ {stats['dares_completed']}", inline=True)
     embed.add_field(name="⚔️ Challenges Won", value=f"👑 {stats['challenges_completed']}", inline=True)
+    
+    embed.add_field(name="🏆 Earned Titles & Achievements", value=titles_display, inline=False)
+    
+    inv = stats.get("inventory", {"shield": 0, "reverse": 0, "target": 0})
+    inv_display = f"🛡️ Shields: `{inv.get('shield', 0)}` | 🔄 Reverses: `{inv.get('reverse', 0)}` | 🎯 Targets: `{inv.get('target', 0)}`"
+    embed.add_field(name="🎒 Inventory Bag", value=inv_display, inline=False)
     
     embed.set_footer(text=f"Total Actions Selected: {total_attempts}")
     await interaction.response.send_message(embed=embed)
@@ -248,7 +354,97 @@ async def leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # ==========================================
-# 6. ACTION CORE GAMEPLAY COMMANDS
+# 6. ECONOMY POINT SHOP & INVENTORY ITEMS ENGINE
+# ==========================================
+@bot.tree.command(name="shop", description="Open the item point economy store.")
+async def shop(interaction: discord.Interaction):
+    embed = discord.Embed(title="🛒 Point Economy Item Shop", description="Spend your hard-earned score to acquire rule-bending tactics!", color=discord.Color.blue())
+    for key, data in SHOP_ITEMS.items():
+        embed.add_field(name=f"{data['name']} — Cost: {data['cost']} pts", value=f"*{data['desc']}*\nUse via `/use_item item:{key}`", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="buy_item", description="Purchase an advantage item from the point shop.")
+@app_commands.choices(item=[
+    app_commands.Choice(name="🛡️ Shield (5 pts)", value="shield"),
+    app_commands.Choice(name="🔄 Reverse Card (10 pts)", value="reverse"),
+    app_commands.Choice(name="🎯 Target (15 pts)", value="target")
+])
+async def buy_item(interaction: discord.Interaction, item: app_commands.Choice[str]):
+    guild_id, user_id = str(interaction.guild_id), str(interaction.user.id)
+    ensure_user_stats(guild_id, user_id)
+    
+    item_key = item.value
+    cost = SHOP_ITEMS[item_key]["cost"]
+    
+    if stats_storage[guild_id][user_id]["points"] < cost:
+        return await interaction.response.send_message(f"❌ You cannot afford this item! You need `{cost} pts` but only have `{stats_storage[guild_id][user_id]['points']} pts`.", ephemeral=True)
+        
+    stats_storage[guild_id][user_id]["points"] -= cost
+    stats_storage[guild_id][user_id]["inventory"][item_key] += 1
+    save_json(STATS_FILE, stats_storage)
+    
+    await interaction.response.send_message(f"🎒 Successfully bought 1x **{SHOP_ITEMS[item_key]['name']}**! Handled ledger balance: `{stats_storage[guild_id][user_id]['points']} pts` left.")
+
+@bot.tree.command(name="use_item", description="Use an item from your bag inventory.")
+@app_commands.choices(item=[
+    app_commands.Choice(name="🛡️ Shield", value="shield"),
+    app_commands.Choice(name="🔄 Reverse Card", value="reverse"),
+    app_commands.Choice(name="🎯 Target", value="target")
+])
+async def use_item(interaction: discord.Interaction, item: app_commands.Choice[str], target_player: discord.Member = None):
+    guild_id, user_id = str(interaction.guild_id), str(interaction.user.id)
+    ensure_user_stats(guild_id, user_id)
+    
+    item_key = item.value
+    if stats_storage[guild_id][user_id]["inventory"].get(item_key, 0) <= 0:
+        return await interaction.response.send_message(f"❌ You do not possess any **{SHOP_ITEMS[item_key]['name']}** inside your active inventory!", ephemeral=True)
+
+    # Validate game state context
+    if guild_id not in active_games or len(active_games[guild_id]["players"]) == 0:
+        return await interaction.response.send_message("❌ Items can only be activated while an active game lobby is running!", ephemeral=True)
+        
+    game = active_games[guild_id]
+    current_turn_player = game["players"][game["index"]]
+    
+    if user_id != current_turn_player:
+        return await interaction.response.send_message("❌ You can only activate items during your own active turn!", ephemeral=True)
+
+    if item_key == "shield":
+        stats_storage[guild_id][user_id]["inventory"]["shield"] -= 1
+        save_json(STATS_FILE, stats_storage)
+        await interaction.response.send_message(f"🛡️ **{interaction.user.display_name}** popped a Shield! Skipping turn without any point execution penalty.")
+        await advance_turn(interaction.guild_id, interaction.channel)
+        
+    elif item_key == "reverse":
+        if len(game["players"]) < 2:
+            return await interaction.response.send_message("❌ Not enough players in queue to reverse this turn!", ephemeral=True)
+        
+        stats_storage[guild_id][user_id]["inventory"]["reverse"] -= 1
+        save_json(STATS_FILE, stats_storage)
+        
+        # Pick previous or next player to catch the heat
+        prev_index = (game["index"] - 1) % len(game["players"])
+        victim_id = game["players"][prev_index]
+        
+        await interaction.response.send_message(f"🔄 **REVERSE CARD PLAYED!** <@{user_id}> bounced the target tracking back to <@{victim_id}>! They must call a `/truth` or `/dare` immediately!")
+        await advance_turn(interaction.guild_id, interaction.channel, override_next_player=victim_id)
+
+    elif item_key == "target":
+        if not target_player:
+            return await interaction.response.send_message("❌ You must specify a `target_player` parameter to use this item!", ephemeral=True)
+            
+        target_id_str = str(target_player.id)
+        if target_id_str not in game["players"]:
+            return await interaction.response.send_message("❌ That targeted member is not inside the current game queue list!", ephemeral=True)
+            
+        stats_storage[guild_id][user_id]["inventory"]["target"] -= 1
+        save_json(STATS_FILE, stats_storage)
+        
+        await interaction.response.send_message(f"🎯 **TARGET ACQUIRED!** <@{user_id}> hijacked the server pathing wheel and forced the spotlight onto <@{target_id_str}>!")
+        await advance_turn(interaction.guild_id, interaction.channel, override_next_player=target_id_str)
+
+# ==========================================
+# 7. ACTION CORE GAMEPLAY COMMANDS
 # ==========================================
 @bot.tree.command(name="truth", description="Get a random truth question.")
 @app_commands.choices(rating=[
@@ -267,12 +463,14 @@ async def truth(interaction: discord.Interaction, rating: app_commands.Choice[st
     selected_truth = random.choice(pool)
     points_worth = POINTS_MAP[rating.value]
     
+    mult, mult_msg = get_multiplier_details()
+    
     embed = discord.Embed(
-        title=f"🤫 Truth ({rating.name}) [+{points_worth} pts]",
-        description=f"**{interaction.user.mention}**, your question is:\n\n💬 *{selected_truth}*",
+        title=f"🤫 Truth ({rating.name}) [+{points_worth * mult} pts]",
+        description=f"{mult_msg}\n\n**{interaction.user.mention}**, your question is:\n\n💬 *{selected_truth}*",
         color=discord.Color.blue()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -297,12 +495,14 @@ async def dare(interaction: discord.Interaction, rating: app_commands.Choice[str
     selected_dare = random.choice(pool)
     points_worth = POINTS_MAP[rating.value]
     
+    mult, mult_msg = get_multiplier_details()
+    
     embed = discord.Embed(
-        title=f"🔥 Dare ({rating.name} | {mode.name}) [+{points_worth} pts]",
-        description=f"**{interaction.user.mention}**, your dare is:\n\n⚡ *{selected_dare}*",
+        title=f"🔥 Dare ({rating.name} | {mode.name}) [+{points_worth * mult} pts]",
+        description=f"{mult_msg}\n\n**{interaction.user.mention}**, your dare is:\n\n⚡ *{selected_dare}*",
         color=discord.Color.red()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -314,12 +514,14 @@ async def challenge(interaction: discord.Interaction):
     selected_challenge = random.choice(CHALLENGES)
     points_worth = POINTS_MAP["challenge"]
     
+    mult, mult_msg = get_multiplier_details()
+    
     embed = discord.Embed(
-        title=f"⚔️ Epic Challenge Mode [+{points_worth} pts] ⚔️",
-        description=f"**{interaction.user.mention}** has pulled a challenge:\n\n{selected_challenge}",
+        title=f"⚔️ Epic Challenge Mode [+{points_worth * mult} pts] ⚔️",
+        description=f"{mult_msg}\n\n**{interaction.user.mention}** has pulled a challenge:\n\n{selected_challenge}",
         color=discord.Color.gold()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="challenges_completed", show_timer=True)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="challenges_completed", show_timer=True, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -333,6 +535,8 @@ async def random_tod(interaction: discord.Interaction):
     rating_display_names = {"normal": "Normal", "teen": "Teen (Spicy)", "18+": "18+ (Extra Spicy)"}
     points_worth = POINTS_MAP[rating_val]
     
+    mult, mult_msg = get_multiplier_details()
+    
     if is_truth:
         base_pool = DEFAULT_TRUTHS.get(rating_val, ["No parameters configured."])
         pool = base_pool.copy()
@@ -340,11 +544,11 @@ async def random_tod(interaction: discord.Interaction):
         selected = random.choice(pool)
         
         embed = discord.Embed(
-            title=f"🎲 Random Roll: 🤫 Truth ({rating_display_names[rating_val]}) [+{points_worth} pts]",
-            description=f"**{interaction.user.mention}**, destiny has chosen a truth for you:\n\n💬 *{selected}*",
+            title=f"🎲 Random Roll: 🤫 Truth ({rating_display_names[rating_val]}) [+{points_worth * mult} pts]",
+            description=f"{mult_msg}\n\n**{interaction.user.mention}**, destiny has chosen a truth for you:\n\n💬 *{selected}*",
             color=discord.Color.blue()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False)
+        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False, multiplier=mult)
     else:
         mode_val = random.choice(["in_person", "online"])
         mode_display_names = {"in_person": "In-Person", "online": "Online"}
@@ -355,17 +559,17 @@ async def random_tod(interaction: discord.Interaction):
         selected = random.choice(pool)
         
         embed = discord.Embed(
-            title=f"🎲 Random Roll: 🔥 Dare ({rating_display_names[rating_val]} | {mode_display_names[mode_val]}) [+{points_worth} pts]",
-            description=f"**{interaction.user.mention}**, destiny has chosen a dare for you:\n\n⚡ *{selected}*",
+            title=f"🎲 Random Roll: 🔥 Dare ({rating_display_names[rating_val]} | {mode_display_names[mode_val]}) [+{points_worth * mult} pts]",
+            description=f"{mult_msg}\n\n**{interaction.user.mention}**, destiny has chosen a dare for you:\n\n⚡ *{selected}*",
             color=discord.Color.red()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True)
+        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True, multiplier=mult)
 
     await interaction.response.send_message(embed=embed, view=view)
 
 
 # ==========================================
-# 7. CUSTOM CONTENT ADMIN COMMAND
+# 8. CUSTOM CONTENT ADMIN COMMAND
 # ==========================================
 @bot.tree.command(name="add_custom", description="Add a server-specific custom Truth or Dare.")
 @app_commands.choices(type=[
