@@ -327,7 +327,7 @@ class LobbyView(discord.ui.View):
         user_id = str(interaction.user.id)
         
         if self.guild_id not in active_games:
-            active_games[self.guild_id] = {"players": [], "index": 0, "used_prompts": []}
+            active_games[self.guild_id] = {"players": [], "index": 0, "used_prompts": {}}
             
         if user_id in active_games[self.guild_id]["players"]:
             return await interaction.response.send_message("You are already in the lobby!", ephemeral=True)
