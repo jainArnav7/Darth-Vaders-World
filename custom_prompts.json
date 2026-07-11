@@ -1,0 +1,34 @@
+{
+    "1337247460791287899": {
+        "truth": [
+            "What is one opinion you hold that most people here would disagree with?",
+            "What is the most ridiculous lie you\u2019ve ever told to get out of something?",
+            "What is a secret talent or skill you have that nobody knows about?",
+            "what is the weirdest thing you\u2019ve ever said in front of a parent?"
+        ],
+        "dare": {
+            "in_person": [
+                "Speak in an accent for the next 3 rounds.",
+                "Do 20 seconds of dramatic opera singing."
+            ],
+            "online": [
+                "Send the last meme you saved to the group.",
+                "Text someone \u201cI need to tell you something\u2026\u201d and don\u2019t explain for 10 minutes.",
+                "Do your best impression of someone in the room.",
+                "Let the group pick your next profile picture.",
+                "Show the last photo you took (no deleting).",
+                "Let someone else write a message and you must send it.",
+                "Let the group choose a random emoji and you must speak only using that vibe for 2 minutes.",
+                "Type with only emojis for the next 5 minutes.",
+                "Tell everyone your most embarrassing autocorrect fail.",
+                "Change your profile picture for 1 hour.",
+                "Try to make up a commercial for a spoon in 30 seconds.",
+                "Draw a cat with your non-dominant hand and show it.",
+                "Turn the last text you sent into a dramatic movie trailer.",
+                "Send everyone the weirdest meme/photo you have",
+                "Send everyone a feet pic and don’t delete it for 5 minutes.",
+                "Let someone else write a text for you and you must send it."
+            ]
+        }
+    }
+}
