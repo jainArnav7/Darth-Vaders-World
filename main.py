@@ -88,24 +88,25 @@ def track_activity(guild_id, user_id, stat_type, points_change):
     return stats_storage[guild_id][user_id]
 
 # NON-REPEATING PROMPT ENGINE
-def get_unique_prompt(guild_id, pool):
+def get_unique_prompt(guild_id, pool, category="default"):
     guild_id = str(guild_id)
     if guild_id not in active_games:
         return random.choice(pool) # Fallback if rolled outside a lobby
 
     if "used_prompts" not in active_games[guild_id]:
-        active_games[guild_id]["used_prompts"] = []
+        active_games[guild_id]["used_prompts"] = {}
+    used=active_games[guild_id]["used_prompts"].setdefault(category, [])
 
     # Filter out anything already tracked in this game session
-    available = [p for p in pool if p not in active_games[guild_id]["used_prompts"]]
+    available = [p for p in pool if p not in used]
 
     if not available:
         # If pool is exhausted, clear ONLY these specific prompts from the used list to restock
-        active_games[guild_id]["used_prompts"] = [p for p in active_games[guild_id]["used_prompts"] if p not in pool]
-        available = pool
+        used.clear()
+        available = pool.copy()
 
     selected = random.choice(available)
-    active_games[guild_id]["used_prompts"].append(selected)
+    used.append(selected)
     return selected
 
 async def advance_turn(guild_id, channel, override_next_player=None):
@@ -536,7 +537,7 @@ async def truth(interaction: discord.Interaction, rating: app_commands.Choice[st
     pool = base_pool.copy()
     pool.extend(custom_storage[guild_id]["truth"])
     
-    selected_truth = get_unique_prompt(guild_id, pool)
+    selected_truth = get_unique_prompt(guild_id, pool, f"truth_{rating.value}")
     points_worth = POINTS_MAP[rating.value]
     
     mult, mult_msg = get_multiplier_details()
@@ -569,7 +570,7 @@ async def dare(interaction: discord.Interaction, rating: app_commands.Choice[str
     pool = base_pool.copy()
     pool.extend(custom_storage[guild_id]["dare"][mode.value])
     
-    selected_dare = get_unique_prompt(guild_id, pool)
+    selected_dare = get_unique_prompt(guild_id, pool, f"dare_{rating.value}_{mode.value}")
     points_worth = POINTS_MAP[rating.value]
     
     mult, mult_msg = get_multiplier_details()
@@ -590,7 +591,7 @@ async def challenge(interaction: discord.Interaction):
     if not CHALLENGES:
         return await interaction.response.send_message("❌ No challenges loaded inside configurations.")
         
-    selected_challenge = get_unique_prompt(guild_id, CHALLENGES)
+    selected_challenge = get_unique_prompt(guild_id, CHALLENGES, "challenges")
     points_worth = POINTS_MAP["challenge"]
     
     mult, mult_msg = get_multiplier_details()
@@ -621,7 +622,7 @@ async def random_tod(interaction: discord.Interaction):
         base_pool = DEFAULT_TRUTHS.get(rating_val, ["No parameters configured."])
         pool = base_pool.copy()
         pool.extend(custom_storage[guild_id]["truth"])
-        selected = get_unique_prompt(guild_id, pool)
+        selected = get_unique_prompt(guild_id, pool, f"truth_{rating_val}")
         
         desc_template = "{mult_msg}\n\n**{user}**, destiny has chosen a truth for you:\n\n💬 *{prompt}*"
         embed = discord.Embed(
@@ -637,7 +638,7 @@ async def random_tod(interaction: discord.Interaction):
         base_pool = DEFAULT_DARES.get(rating_val, {}).get(mode_val, ["No parameters configured."])
         pool = base_pool.copy()
         pool.extend(custom_storage[guild_id]["dare"][mode_val])
-        selected = get_unique_prompt(guild_id, pool)
+        selected = get_unique_prompt(guild_id, pool, f"dare_{rating_val}_{mode_val}")
         
         desc_template = "{mult_msg}\n\n**{user}**, destiny has chosen a dare for you:\n\n⚡ *{prompt}*"
         embed = discord.Embed(
