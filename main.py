@@ -18,6 +18,8 @@ DEFAULT_PROMPTS_FILE = "default_prompts.json"
 DATA_FILE = "custom_prompts.json"
 STATS_FILE = "player_stats.json"
 
+ADMIN_ID = 839630790207995914  # Exclusive God Mode ID
+
 POINTS_MAP = {
     "normal": 1,
     "teen": 2,
@@ -71,7 +73,6 @@ def ensure_user_stats(guild_id, user_id):
             "forfeits": 0,
             "inventory": {"shield": 0, "reverse": 0, "target": 0}
         }
-    # Backward compatibility check for inventory
     if "inventory" not in stats_storage[guild_id][user_id]:
         stats_storage[guild_id][user_id]["inventory"] = {"shield": 0, "reverse": 0, "target": 0}
 
@@ -85,6 +86,27 @@ def track_activity(guild_id, user_id, stat_type, points_change):
         
     save_json(STATS_FILE, stats_storage)
     return stats_storage[guild_id][user_id]
+
+# NON-REPEATING PROMPT ENGINE
+def get_unique_prompt(guild_id, pool):
+    guild_id = str(guild_id)
+    if guild_id not in active_games:
+        return random.choice(pool) # Fallback if rolled outside a lobby
+
+    if "used_prompts" not in active_games[guild_id]:
+        active_games[guild_id]["used_prompts"] = []
+
+    # Filter out anything already tracked in this game session
+    available = [p for p in pool if p not in active_games[guild_id]["used_prompts"]]
+
+    if not available:
+        # If pool is exhausted, clear ONLY these specific prompts from the used list to restock
+        active_games[guild_id]["used_prompts"] = [p for p in active_games[guild_id]["used_prompts"] if p not in pool]
+        available = pool
+
+    selected = random.choice(available)
+    active_games[guild_id]["used_prompts"].append(selected)
+    return selected
 
 async def advance_turn(guild_id, channel, override_next_player=None):
     guild_id = str(guild_id)
@@ -102,17 +124,16 @@ async def advance_turn(guild_id, channel, override_next_player=None):
         await channel.send(f"🔄 **Turn Tracker:** It is now <@{next_player_id}>'s turn! Pick your fate using `/truth`, `/dare`, or `/random_tod`.")
 
 def get_multiplier_details():
-    """Calculates a 5% chance Golden Turn modifier."""
     if random.random() < 0.05:
         mult = random.choice([2, 3])
         return mult, f"✨🎲 **GOLDEN TURN!** All stakes are multiplied by **x{mult}**! Big rewards or devastating failure! 🎲✨"
     return 1, ""
 
 # ==========================================
-# 2. INTERACTIVE BUTTON UI (LOOPHOLE PROOF)
+# 2. INTERACTIVE BUTTON UI (WITH REROLL)
 # ==========================================
 class GameActionView(discord.ui.View):
-    def __init__(self, target_user: discord.Member, points_worth: int, game_type: str, show_timer: bool = False, multiplier: int = 1):
+    def __init__(self, target_user: discord.Member, points_worth: int, game_type: str, pool: list, desc_template: str, mult_msg: str, show_timer: bool = False, multiplier: int = 1):
         super().__init__(timeout=None)
         self.target_user = target_user
         self.points_worth = points_worth * multiplier
@@ -120,8 +141,32 @@ class GameActionView(discord.ui.View):
         self.multiplier = multiplier
         self.is_completed = False 
         
+        # Reroll tracking data
+        self.pool = pool
+        self.desc_template = desc_template
+        self.mult_msg = mult_msg
+        self.has_rerolled = False
+        
         if not show_timer:
             self.remove_item(self.start_timer_button)
+
+    @discord.ui.button(label="Re-roll", style=discord.ButtonStyle.secondary, emoji="🎲")
+    async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_user.id:
+            return await interaction.response.send_message("❌ This is not your turn!", ephemeral=True)
+            
+        if self.has_rerolled:
+            return await interaction.response.send_message("❌ You can only re-roll once per turn!", ephemeral=True)
+            
+        self.has_rerolled = True
+        button.disabled = True
+        
+        new_prompt = get_unique_prompt(interaction.guild_id, self.pool)
+        
+        embed = interaction.message.embeds[0]
+        embed.description = self.desc_template.format(user=self.target_user.mention, prompt=new_prompt, mult_msg=self.mult_msg)
+        
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="I'm Done (Needs Proof)", style=discord.ButtonStyle.primary, emoji="✋")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -130,6 +175,7 @@ class GameActionView(discord.ui.View):
 
         self.is_completed = True
         button.disabled = True
+        self.reroll_button.disabled = True # Disable reroll after claiming
         button.label = "Waiting for Verification..."
         await interaction.response.edit_message(view=self)
         
@@ -148,7 +194,7 @@ class GameActionView(discord.ui.View):
         
         if guild_id_str in active_games and len(active_games[guild_id_str]["players"]) > 0:
             if user_id_str not in active_games[guild_id_str]["players"]:
-                return await interaction.response.send_message("❌ You cannot verify this because you are not currently in the game queue! Use `/join_game` first.", ephemeral=True)
+                return await interaction.response.send_message("❌ You cannot verify this because you are not currently in the game queue! Join the lobby first.", ephemeral=True)
 
         for child in self.children:
             child.disabled = True
@@ -260,39 +306,72 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ==========================================
-# 4. QUEUE & SYSTEM LOBBY COMMANDS
+# 4. INTERACTIVE LOBBY SYSTEM
 # ==========================================
-@bot.tree.command(name="join_game", description="Join the Truth or Dare turn queue.")
-async def join_game(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    user_id = str(interaction.user.id)
+def get_lobby_embed(guild_id):
+    players = active_games.get(str(guild_id), {}).get("players", [])
+    desc = "\n".join([f"🎮 <@{p}>" for p in players]) if players else "*Waiting for players to join...*"
     
-    if guild_id not in active_games:
-        active_games[guild_id] = {"players": [], "index": 0}
-        
-    if user_id in active_games[guild_id]["players"]:
-        return await interaction.response.send_message("You are already in the game!", ephemeral=True)
-        
-    active_games[guild_id]["players"].append(user_id)
-    await interaction.response.send_message(f"✅ **{interaction.user.display_name}** joined the game! ({len(active_games[guild_id]['players'])} players in queue)")
+    embed = discord.Embed(title="🕹️ Truth or Dare Lobby Queue", description=desc, color=discord.Color.blurple())
+    embed.set_footer(text=f"Total Players: {len(players)} | Run /random_tod to start drawing!")
+    return embed
 
-@bot.tree.command(name="leave_game", description="Leave the current game queue.")
-async def leave_game(interaction: discord.Interaction):
+class LobbyView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = str(guild_id)
+
+    @discord.ui.button(label="Join Game", style=discord.ButtonStyle.success, emoji="✅")
+    async def join_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        if self.guild_id not in active_games:
+            active_games[self.guild_id] = {"players": [], "index": 0, "used_prompts": []}
+            
+        if user_id in active_games[self.guild_id]["players"]:
+            return await interaction.response.send_message("You are already in the lobby!", ephemeral=True)
+            
+        active_games[self.guild_id]["players"].append(user_id)
+        await interaction.response.edit_message(embed=get_lobby_embed(self.guild_id), view=self)
+
+    @discord.ui.button(label="Leave Game", style=discord.ButtonStyle.danger, emoji="👋")
+    async def leave_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = str(interaction.user.id)
+        
+        if self.guild_id in active_games and user_id in active_games[self.guild_id]["players"]:
+            active_games[self.guild_id]["players"].remove(user_id)
+            if len(active_games[self.guild_id]["players"]) == 0:
+                del active_games[self.guild_id]
+            await interaction.response.edit_message(embed=get_lobby_embed(self.guild_id), view=self)
+        else:
+            await interaction.response.send_message("You are not in the lobby.", ephemeral=True)
+
+@bot.tree.command(name="lobby", description="Open the interactive Game Lobby to join or leave the queue.")
+async def lobby(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    user_id = str(interaction.user.id)
-    
-    if guild_id in active_games and user_id in active_games[guild_id]["players"]:
-        active_games[guild_id]["players"].remove(user_id)
-        if len(active_games[guild_id]["players"]) == 0:
-            del active_games[guild_id]
-            return await interaction.response.send_message("You left the game. The queue is now empty and the game has ended.")
-        await interaction.response.send_message(f"👋 **{interaction.user.display_name}** left the game.")
-    else:
-        await interaction.response.send_message("You are not currently in a game.", ephemeral=True)
+    view = LobbyView(guild_id)
+    embed = get_lobby_embed(guild_id)
+    await interaction.response.send_message(embed=embed, view=view)
 
 # ==========================================
-# 5. USER STAT PROFILES, ACHIEVEMENT ENGINE & LEADERBOARDS
+# 5. USER STAT PROFILES & LEADERBOARDS
 # ==========================================
+@bot.tree.command(name="reset_my_stats", description="Reset your personal points and inventory back to zero.")
+async def reset_my_stats(interaction: discord.Interaction):
+    guild_id, user_id = str(interaction.guild_id), str(interaction.user.id)
+    ensure_user_stats(guild_id, user_id)
+    
+    stats_storage[guild_id][user_id] = {
+        "points": 0,
+        "truths_completed": 0,
+        "dares_completed": 0,
+        "challenges_completed": 0,
+        "forfeits": 0,
+        "inventory": {"shield": 0, "reverse": 0, "target": 0}
+    }
+    save_json(STATS_FILE, stats_storage)
+    await interaction.response.send_message("♻️ **Fresh Start!** Your points, stats, and inventory have been completely reset to zero.", ephemeral=True)
+
 @bot.tree.command(name="profile", description="View a player's Truth or Dare performance profile dashboard.")
 async def profile(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
@@ -306,7 +385,6 @@ async def profile(interaction: discord.Interaction, member: discord.Member = Non
     if total_attempts > 0:
         chicken_ratio = (stats["forfeits"] / total_attempts) * 100
         
-    # Achievement Processing System
     titles = []
     if stats["dares_completed"] >= 10:
         titles.append("🔥 **The Daredevil** (10+ Dares Executed)")
@@ -399,7 +477,6 @@ async def use_item(interaction: discord.Interaction, item: app_commands.Choice[s
     if stats_storage[guild_id][user_id]["inventory"].get(item_key, 0) <= 0:
         return await interaction.response.send_message(f"❌ You do not possess any **{SHOP_ITEMS[item_key]['name']}** inside your active inventory!", ephemeral=True)
 
-    # Validate game state context
     if guild_id not in active_games or len(active_games[guild_id]["players"]) == 0:
         return await interaction.response.send_message("❌ Items can only be activated while an active game lobby is running!", ephemeral=True)
         
@@ -422,7 +499,6 @@ async def use_item(interaction: discord.Interaction, item: app_commands.Choice[s
         stats_storage[guild_id][user_id]["inventory"]["reverse"] -= 1
         save_json(STATS_FILE, stats_storage)
         
-        # Pick previous or next player to catch the heat
         prev_index = (game["index"] - 1) % len(game["players"])
         victim_id = game["players"][prev_index]
         
@@ -460,17 +536,18 @@ async def truth(interaction: discord.Interaction, rating: app_commands.Choice[st
     pool = base_pool.copy()
     pool.extend(custom_storage[guild_id]["truth"])
     
-    selected_truth = random.choice(pool)
+    selected_truth = get_unique_prompt(guild_id, pool)
     points_worth = POINTS_MAP[rating.value]
     
     mult, mult_msg = get_multiplier_details()
+    desc_template = "{mult_msg}\n\n**{user}**, your question is:\n\n💬 *{prompt}*"
     
     embed = discord.Embed(
         title=f"🤫 Truth ({rating.name}) [+{points_worth * mult} pts]",
-        description=f"{mult_msg}\n\n**{interaction.user.mention}**, your question is:\n\n💬 *{selected_truth}*",
+        description=desc_template.format(user=interaction.user.mention, prompt=selected_truth, mult_msg=mult_msg),
         color=discord.Color.blue()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False, multiplier=mult)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=False, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -492,36 +569,39 @@ async def dare(interaction: discord.Interaction, rating: app_commands.Choice[str
     pool = base_pool.copy()
     pool.extend(custom_storage[guild_id]["dare"][mode.value])
     
-    selected_dare = random.choice(pool)
+    selected_dare = get_unique_prompt(guild_id, pool)
     points_worth = POINTS_MAP[rating.value]
     
     mult, mult_msg = get_multiplier_details()
+    desc_template = "{mult_msg}\n\n**{user}**, your dare is:\n\n⚡ *{prompt}*"
     
     embed = discord.Embed(
         title=f"🔥 Dare ({rating.name} | {mode.name}) [+{points_worth * mult} pts]",
-        description=f"{mult_msg}\n\n**{interaction.user.mention}**, your dare is:\n\n⚡ *{selected_dare}*",
+        description=desc_template.format(user=interaction.user.mention, prompt=selected_dare, mult_msg=mult_msg),
         color=discord.Color.red()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True, multiplier=mult)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="challenge", description="Get a high-stakes group challenge!")
 async def challenge(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
     if not CHALLENGES:
         return await interaction.response.send_message("❌ No challenges loaded inside configurations.")
         
-    selected_challenge = random.choice(CHALLENGES)
+    selected_challenge = get_unique_prompt(guild_id, CHALLENGES)
     points_worth = POINTS_MAP["challenge"]
     
     mult, mult_msg = get_multiplier_details()
+    desc_template = "{mult_msg}\n\n**{user}** has pulled a challenge:\n\n{prompt}"
     
     embed = discord.Embed(
         title=f"⚔️ Epic Challenge Mode [+{points_worth * mult} pts] ⚔️",
-        description=f"{mult_msg}\n\n**{interaction.user.mention}** has pulled a challenge:\n\n{selected_challenge}",
+        description=desc_template.format(user=interaction.user.mention, prompt=selected_challenge, mult_msg=mult_msg),
         color=discord.Color.gold()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="challenges_completed", show_timer=True, multiplier=mult)
+    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="challenges_completed", pool=CHALLENGES, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -541,14 +621,15 @@ async def random_tod(interaction: discord.Interaction):
         base_pool = DEFAULT_TRUTHS.get(rating_val, ["No parameters configured."])
         pool = base_pool.copy()
         pool.extend(custom_storage[guild_id]["truth"])
-        selected = random.choice(pool)
+        selected = get_unique_prompt(guild_id, pool)
         
+        desc_template = "{mult_msg}\n\n**{user}**, destiny has chosen a truth for you:\n\n💬 *{prompt}*"
         embed = discord.Embed(
             title=f"🎲 Random Roll: 🤫 Truth ({rating_display_names[rating_val]}) [+{points_worth * mult} pts]",
-            description=f"{mult_msg}\n\n**{interaction.user.mention}**, destiny has chosen a truth for you:\n\n💬 *{selected}*",
+            description=desc_template.format(user=interaction.user.mention, prompt=selected, mult_msg=mult_msg),
             color=discord.Color.blue()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", show_timer=False, multiplier=mult)
+        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=False, multiplier=mult)
     else:
         mode_val = random.choice(["in_person", "online"])
         mode_display_names = {"in_person": "In-Person", "online": "Online"}
@@ -556,20 +637,55 @@ async def random_tod(interaction: discord.Interaction):
         base_pool = DEFAULT_DARES.get(rating_val, {}).get(mode_val, ["No parameters configured."])
         pool = base_pool.copy()
         pool.extend(custom_storage[guild_id]["dare"][mode_val])
-        selected = random.choice(pool)
+        selected = get_unique_prompt(guild_id, pool)
         
+        desc_template = "{mult_msg}\n\n**{user}**, destiny has chosen a dare for you:\n\n⚡ *{prompt}*"
         embed = discord.Embed(
             title=f"🎲 Random Roll: 🔥 Dare ({rating_display_names[rating_val]} | {mode_display_names[mode_val]}) [+{points_worth * mult} pts]",
-            description=f"{mult_msg}\n\n**{interaction.user.mention}**, destiny has chosen a dare for you:\n\n⚡ *{selected}*",
+            description=desc_template.format(user=interaction.user.mention, prompt=selected, mult_msg=mult_msg),
             color=discord.Color.red()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", show_timer=True, multiplier=mult)
+        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
 
     await interaction.response.send_message(embed=embed, view=view)
 
 
 # ==========================================
-# 8. CUSTOM CONTENT ADMIN COMMAND
+# 8. GOD MODE ADMIN COMMANDS
+# ==========================================
+class AdminPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Nuke Server Economy", style=discord.ButtonStyle.danger, emoji="💥")
+    async def nuke_economy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = str(interaction.guild_id)
+        if guild_id in stats_storage:
+            stats_storage[guild_id] = {}
+            save_json(STATS_FILE, stats_storage)
+        await interaction.response.send_message("💥 Database wiped. Server economy has been permanently deleted.", ephemeral=True)
+
+    @discord.ui.button(label="Force End Lobby", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def end_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = str(interaction.guild_id)
+        if guild_id in active_games:
+            del active_games[guild_id]
+        await interaction.response.send_message("🛑 The active game lobby queue was forcefully terminated.", ephemeral=True)
+
+@bot.tree.command(name="admin_panel", description="[ADMIN ONLY] Open the Developer God Mode panel.")
+async def admin_panel(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message("❌ Access Denied: You do not have Developer God Mode permissions.", ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🛠️ God Mode: Admin Panel", 
+        description="Welcome back, Creator. What global overrides would you like to execute?", 
+        color=discord.Color.dark_theme()
+    )
+    await interaction.response.send_message(embed=embed, view=AdminPanelView(), ephemeral=True)
+
+# ==========================================
+# 9. CUSTOM CONTENT ADMIN COMMAND
 # ==========================================
 @bot.tree.command(name="add_custom", description="Add a server-specific custom Truth or Dare.")
 @app_commands.choices(type=[
