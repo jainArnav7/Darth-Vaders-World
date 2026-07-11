@@ -661,33 +661,144 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Nuke Server Economy", style=discord.ButtonStyle.danger, emoji="💥")
     async def nuke_economy(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild_id)
+
         if guild_id in stats_storage:
             stats_storage[guild_id] = {}
             save_json(STATS_FILE, stats_storage)
-        await interaction.response.send_message("💥 Database wiped. Server economy has been permanently deleted.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "💥 Database wiped. Server economy has been permanently deleted.",
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Force End Lobby", style=discord.ButtonStyle.danger, emoji="🛑")
     async def end_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = str(interaction.guild_id)
+
         if guild_id in active_games:
             del active_games[guild_id]
-        await interaction.response.send_message("🛑 The active game lobby queue was forcefully terminated.", ephemeral=True)
 
-@bot.tree.command(name="admin_panel", description="[ADMIN ONLY] Open the Developer God Mode panel.")
-async def admin_panel(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_ID:
-        return await interaction.response.send_message("❌ Access Denied: You do not have Developer God Mode permissions.", ephemeral=True)
-    
-    embed = discord.Embed(
-        title="🛠️ God Mode: Admin Panel", 
-        description="Welcome back, Creator. What global overrides would you like to execute?", 
-        color=discord.Color.dark_theme()
-    )
-    await interaction.response.send_message(embed=embed, view=AdminPanelView(), ephemeral=True)
+        await interaction.response.send_message(
+            "🛑 Active lobby ended.",
+            ephemeral=True
+        )
 
+    @discord.ui.button(label="Give Points", style=discord.ButtonStyle.success, emoji="➕")
+    async def give_points(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GivePointsModal())
+
+    @discord.ui.button(label="Take Points", style=discord.ButtonStyle.secondary, emoji="➖")
+    async def take_points(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TakePointsModal())
+
+    @discord.ui.button(label="Reset Player", style=discord.ButtonStyle.primary, emoji="♻️")
+    async def reset_player(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ResetPlayerModal())
 # ==========================================
 # 9. CUSTOM CONTENT ADMIN COMMAND
 # ==========================================
+class GivePointsModal(discord.ui.Modal, title="Give Points"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID",
+        placeholder="Enter Discord User ID"
+    )
+
+    amount = discord.ui.TextInput(
+        label="Points",
+        placeholder="How many points?"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        try:
+            pts = int(self.amount.value)
+        except:
+            return await interaction.response.send_message(
+                "Invalid number.",
+                ephemeral=True
+            )
+
+        stats_storage[guild][user]["points"] += pts
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"✅ Added **{pts}** points to <@{user}>.",
+            ephemeral=True
+        )
+
+
+class TakePointsModal(discord.ui.Modal, title="Take Points"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID"
+    )
+
+    amount = discord.ui.TextInput(
+        label="Points"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        try:
+            pts = int(self.amount.value)
+        except:
+            return await interaction.response.send_message(
+                "Invalid number.",
+                ephemeral=True
+            )
+
+        stats_storage[guild][user]["points"] -= pts
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"➖ Removed **{pts}** points from <@{user}>.",
+            ephemeral=True
+        )
+
+
+class ResetPlayerModal(discord.ui.Modal, title="Reset Player Stats"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        stats_storage[guild][user] = {
+            "points": 0,
+            "truths_completed": 0,
+            "dares_completed": 0,
+            "challenges_completed": 0,
+            "forfeits": 0,
+            "inventory": {
+                "shield": 0,
+                "reverse": 0,
+                "target": 0
+            }
+        }
+
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"♻️ Reset all stats for <@{user}>.",
+            ephemeral=True
+        )
 @bot.tree.command(name="add_custom", description="Add a server-specific custom Truth or Dare.")
 @app_commands.choices(type=[
     app_commands.Choice(name="Truth", value="truth"),
