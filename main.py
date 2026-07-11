@@ -146,28 +146,51 @@ class GameActionView(discord.ui.View):
         self.pool = pool
         self.desc_template = desc_template
         self.mult_msg = mult_msg
-        self.has_rerolled = False
+        
+        self.rerolls_left = 10
+        self.category = game_type
         
         if not show_timer:
             self.remove_item(self.start_timer_button)
 
-    @discord.ui.button(label="Re-roll", style=discord.ButtonStyle.secondary, emoji="🎲")
+    @discord.ui.button(label="Re-roll (10)", style=discord.ButtonStyle.secondary, emoji="🎲")
     async def reroll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.target_user.id:
-            return await interaction.response.send_message("❌ This is not your turn!", ephemeral=True)
-            
-        if self.has_rerolled:
-            return await interaction.response.send_message("❌ You can only re-roll once per turn!", ephemeral=True)
-            
-        self.has_rerolled = True
-        button.disabled = True
-        
-        new_prompt = get_unique_prompt(interaction.guild_id, self.pool)
-        
+            return await interaction.response.send_message(
+                "❌ This is not your turn!",
+                ephemeral=True
+            )
+
+        if self.rerolls_left <= 0:
+            return await interaction.response.send_message(
+                "❌ You have used all 10 rerolls!",
+                ephemeral=True
+            )
+
+        self.rerolls_left -= 1
+        button.label = f"Re-roll ({self.rerolls_left})"
+
+        if self.rerolls_left == 0:
+            button.disabled = True
+
+        new_prompt = get_unique_prompt(
+            interaction.guild_id,
+            self.pool,
+            self.category
+        )
+
         embed = interaction.message.embeds[0]
-        embed.description = self.desc_template.format(user=self.target_user.mention, prompt=new_prompt, mult_msg=self.mult_msg)
-        
-        await interaction.response.edit_message(embed=embed, view=self)
+
+        embed.description = self.desc_template.format(
+            user=self.target_user.mention,
+            prompt=new_prompt,
+            mult_msg=self.mult_msg
+        )
+
+        await interaction.response.edit_message(
+            embed=embed,
+            view=self
+        )
 
     @discord.ui.button(label="I'm Done (Needs Proof)", style=discord.ButtonStyle.primary, emoji="✋")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -201,7 +224,18 @@ class GameActionView(discord.ui.View):
             child.disabled = True
         await interaction.response.edit_message(view=self)
 
-        user_stats = track_activity(interaction.guild_id, self.target_user.id, self.game_type, self.points_worth)
+        stat = "truths_completed"
+        if self.category.startswith("dare"):
+            stat = "dares_completed"
+        elif self.category == "challenges":
+            stat = "challenges_completed"
+            
+        user_stats = track_activity(
+            interaction.guild_id,
+            self.target_user.id,
+            stat,
+            self.points_worth
+        )
         
         embed = discord.Embed(
             description=f"🎉 **{self.target_user.display_name}**'s task was verified by **{interaction.user.display_name}**! They earned **{self.points_worth} points**! (Total: {user_stats['points']} pts)",
@@ -548,7 +582,16 @@ async def truth(interaction: discord.Interaction, rating: app_commands.Choice[st
         description=desc_template.format(user=interaction.user.mention, prompt=selected_truth, mult_msg=mult_msg),
         color=discord.Color.blue()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=False, multiplier=mult)
+    view = GameActionView(
+        target_user=interaction.user,
+        points_worth=points_worth,
+        game_type=f"truth_{rating.value}",
+        pool=pool,
+        desc_template=desc_template,
+        mult_msg=mult_msg,
+        show_timer=False,
+        multiplier=mult
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -581,7 +624,16 @@ async def dare(interaction: discord.Interaction, rating: app_commands.Choice[str
         description=desc_template.format(user=interaction.user.mention, prompt=selected_dare, mult_msg=mult_msg),
         color=discord.Color.red()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
+    view = GameActionView(
+        target_user=interaction.user,
+        points_worth=points_worth,
+        game_type=f"dare_{rating.value}_{mode.value}",
+        pool=pool,
+        desc_template=desc_template,
+        mult_msg=mult_msg,
+        show_timer=True,
+        multiplier=mult
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -602,7 +654,16 @@ async def challenge(interaction: discord.Interaction):
         description=desc_template.format(user=interaction.user.mention, prompt=selected_challenge, mult_msg=mult_msg),
         color=discord.Color.gold()
     )
-    view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="challenges_completed", pool=CHALLENGES, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
+    view = GameActionView(
+        target_user=interaction.user,
+        points_worth=points_worth,
+        game_type="challenges",
+        pool=CHALLENGES,
+        desc_template=desc_template,
+        mult_msg=mult_msg,
+        show_timer=True,
+        multiplier=mult
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
 
@@ -630,7 +691,17 @@ async def random_tod(interaction: discord.Interaction):
             description=desc_template.format(user=interaction.user.mention, prompt=selected, mult_msg=mult_msg),
             color=discord.Color.blue()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="truths_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=False, multiplier=mult)
+        view = GameActionView(
+            target_user=interaction.user,
+            points_worth=points_worth,
+            game_type=f"truth_{rating_val}",
+            pool=pool,
+            desc_template=desc_template,
+            mult_msg=mult_msg,
+            show_timer=False,
+            multiplier=mult
+        )
+        await interaction.response.send_message(embed=embed, view=view)
     else:
         mode_val = random.choice(["in_person", "online"])
         mode_display_names = {"in_person": "In-Person", "online": "Online"}
@@ -646,14 +717,123 @@ async def random_tod(interaction: discord.Interaction):
             description=desc_template.format(user=interaction.user.mention, prompt=selected, mult_msg=mult_msg),
             color=discord.Color.red()
         )
-        view = GameActionView(target_user=interaction.user, points_worth=points_worth, game_type="dares_completed", pool=pool, desc_template=desc_template, mult_msg=mult_msg, show_timer=True, multiplier=mult)
-
-    await interaction.response.send_message(embed=embed, view=view)
+        view = GameActionView(
+            target_user=interaction.user,
+            points_worth=points_worth,
+            game_type=f"dare_{rating_val}_{mode_val}",
+            pool=pool,
+            desc_template=desc_template,
+            mult_msg=mult_msg,
+            show_timer=True,
+            multiplier=mult
+        )
+        await interaction.response.send_message(embed=embed, view=view)
 
 
 # ==========================================
 # 8. GOD MODE ADMIN COMMANDS
 # ==========================================
+class GivePointsModal(discord.ui.Modal, title="Give Points"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID",
+        placeholder="Enter Discord User ID"
+    )
+
+    amount = discord.ui.TextInput(
+        label="Points",
+        placeholder="How many points?"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        try:
+            pts = int(self.amount.value)
+        except:
+            return await interaction.response.send_message(
+                "Invalid number.",
+                ephemeral=True
+            )
+
+        stats_storage[guild][user]["points"] += pts
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"✅ Added **{pts}** points to <@{user}>.",
+            ephemeral=True
+        )
+
+class TakePointsModal(discord.ui.Modal, title="Take Points"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID"
+    )
+
+    amount = discord.ui.TextInput(
+        label="Points"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        try:
+            pts = int(self.amount.value)
+        except:
+            return await interaction.response.send_message(
+                "Invalid number.",
+                ephemeral=True
+            )
+
+        stats_storage[guild][user]["points"] -= pts
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"➖ Removed **{pts}** points from <@{user}>.",
+            ephemeral=True
+        )
+
+class ResetPlayerModal(discord.ui.Modal, title="Reset Player Stats"):
+
+    user_id = discord.ui.TextInput(
+        label="User ID"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+
+        guild = str(interaction.guild_id)
+        user = self.user_id.value.strip()
+
+        ensure_user_stats(guild, user)
+
+        stats_storage[guild][user] = {
+            "points": 0,
+            "truths_completed": 0,
+            "dares_completed": 0,
+            "challenges_completed": 0,
+            "forfeits": 0,
+            "inventory": {
+                "shield": 0,
+                "reverse": 0,
+                "target": 0
+            }
+        }
+
+        save_json(STATS_FILE, stats_storage)
+
+        await interaction.response.send_message(
+            f"♻️ Reset all stats for <@{user}>.",
+            ephemeral=True
+        )
+
 class AdminPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -694,111 +874,33 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Reset Player", style=discord.ButtonStyle.primary, emoji="♻️")
     async def reset_player(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ResetPlayerModal())
+
+@bot.tree.command(
+    name="admin_panel",
+    description="Open the admin panel."
+)
+async def admin_panel(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID:
+        return await interaction.response.send_message(
+            "❌ You are not allowed to use this.",
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="🛠 Admin Panel",
+        description="Select an admin action below.",
+        color=discord.Color.red()
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        view=AdminPanelView(),
+        ephemeral=True
+    )
+
 # ==========================================
 # 9. CUSTOM CONTENT ADMIN COMMAND
 # ==========================================
-class GivePointsModal(discord.ui.Modal, title="Give Points"):
-
-    user_id = discord.ui.TextInput(
-        label="User ID",
-        placeholder="Enter Discord User ID"
-    )
-
-    amount = discord.ui.TextInput(
-        label="Points",
-        placeholder="How many points?"
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-
-        guild = str(interaction.guild_id)
-        user = self.user_id.value.strip()
-
-        ensure_user_stats(guild, user)
-
-        try:
-            pts = int(self.amount.value)
-        except:
-            return await interaction.response.send_message(
-                "Invalid number.",
-                ephemeral=True
-            )
-
-        stats_storage[guild][user]["points"] += pts
-        save_json(STATS_FILE, stats_storage)
-
-        await interaction.response.send_message(
-            f"✅ Added **{pts}** points to <@{user}>.",
-            ephemeral=True
-        )
-
-
-class TakePointsModal(discord.ui.Modal, title="Take Points"):
-
-    user_id = discord.ui.TextInput(
-        label="User ID"
-    )
-
-    amount = discord.ui.TextInput(
-        label="Points"
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-
-        guild = str(interaction.guild_id)
-        user = self.user_id.value.strip()
-
-        ensure_user_stats(guild, user)
-
-        try:
-            pts = int(self.amount.value)
-        except:
-            return await interaction.response.send_message(
-                "Invalid number.",
-                ephemeral=True
-            )
-
-        stats_storage[guild][user]["points"] -= pts
-        save_json(STATS_FILE, stats_storage)
-
-        await interaction.response.send_message(
-            f"➖ Removed **{pts}** points from <@{user}>.",
-            ephemeral=True
-        )
-
-
-class ResetPlayerModal(discord.ui.Modal, title="Reset Player Stats"):
-
-    user_id = discord.ui.TextInput(
-        label="User ID"
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-
-        guild = str(interaction.guild_id)
-        user = self.user_id.value.strip()
-
-        ensure_user_stats(guild, user)
-
-        stats_storage[guild][user] = {
-            "points": 0,
-            "truths_completed": 0,
-            "dares_completed": 0,
-            "challenges_completed": 0,
-            "forfeits": 0,
-            "inventory": {
-                "shield": 0,
-                "reverse": 0,
-                "target": 0
-            }
-        }
-
-        save_json(STATS_FILE, stats_storage)
-
-        await interaction.response.send_message(
-            f"♻️ Reset all stats for <@{user}>.",
-            ephemeral=True
-        )
 @bot.tree.command(name="add_custom", description="Add a server-specific custom Truth or Dare.")
 @app_commands.choices(type=[
     app_commands.Choice(name="Truth", value="truth"),
