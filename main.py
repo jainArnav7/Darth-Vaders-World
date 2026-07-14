@@ -25,7 +25,7 @@ POINTS_MAP = {
     "teen": 2,
     "18+": 3,
     "challenge": 5,
-    "forfeit": -2
+    "forfeit": -5
 }
 
 SHOP_ITEMS = {
